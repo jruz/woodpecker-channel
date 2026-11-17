@@ -1,0 +1,28 @@
+{
+  "merge": [
+    ".gitignore",
+    "github-settings.json",
+    "Cargo.toml",
+    "woodpecker-settings.yaml",
+    "justfile"
+  ],
+  "replace": [
+    ".cargo/config.toml",
+    ".envrc",
+    ".githooks/",
+    ".just/",
+    ".oxfmtrc.json",
+    ".tools/",
+    ".woodpecker/",
+    "Dockerfile.rust",
+    "LICENSE",
+    "build.rs",
+    "flake.nix",
+    "renovate.json",
+    "rust-toolchain.toml",
+    "scripts/",
+    "src/commands/version.rs",
+    "src/utils/output.rs"
+  ],
+  "review": []
+}

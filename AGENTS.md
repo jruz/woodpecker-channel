@@ -1,0 +1,44 @@
+# Agent instructions
+
+`woodpecker-channel` is an MCP channel server that monitors Woodpecker CI pipelines and notifies Claude Code sessions on failure.
+
+## Architecture
+
+- `src/main.rs`: entrypoint, argument parsing, and command dispatch.
+- `src/commands/`: one thin module per command.
+- `src/core/`: business logic.
+- `src/libs/`: self-contained units that could be extracted into their own crate.
+- `src/utils/`: small generic helpers.
+- `src/commands/version.rs`: version metadata from the release skill.
+- `build.rs`: Git revision and build timestamp with typed errors using `thiserror`.
+- `tests/main.rs`: integration test entrypoint.
+- `tests/commands/`: tests that run the binary, one file per command.
+- `tests/utils/`: shared test helpers.
+
+## Layers
+
+- `main.rs` calls `commands` and `utils`.
+- `commands` calls `core` and `utils`.
+- `core` calls `libs` and `utils`.
+- `libs` calls `utils`.
+- `utils` calls nothing.
+- `just rust::architecture-check` enforces these rules with `scripts/architecture-check.nu`.
+
+## Development
+
+- Use `justfile` and `.just/` recipes for development tasks.
+- Run Cargo commands through `sandbox`.
+- Run `just check`, `just test`, and `slop-detector` after changes.
+
+## Configuration tools
+
+- Run `just tools::check` after configuration changes.
+- Run `just tools::fix` to format configuration.
+- `.tools/` provides its own Nix shell through `.just/tools.justfile`.
+- Keep these checks separate from `just check` and CI.
+
+## Release
+
+- `just release bump <version>` updates Cargo manifests and commits the version bump.
+- Push the bump to `main`; CI handles tagging and publishing.
+- `just release delete <tag>` deletes a published release and its tag.
