@@ -1,23 +1,18 @@
-use std::collections::hash_map;
-
 use tokio::io::AsyncBufReadExt as _;
 use tokio::io::AsyncWriteExt as _;
 
 use crate::core::event;
-use crate::core::notification::Notification;
-use crate::core::poll;
+use crate::core::notification;
 use crate::core::tools;
-use crate::core::watcher;
+use crate::core::watches;
 use crate::libs::mcp::jsonrpc;
 use crate::libs::woodpecker::client;
 use crate::libs::woodpecker::types::Config;
 
-const CHANNEL_METHOD: &str = "notifications/claude/channel";
-
-const INSTRUCTIONS: &str = "CI pipeline events arrive as <channel source=\"woodpecker-channel\" repo=\"...\" branch=\"...\" pipeline=\"...\" status=\"failure|success\">.
-Failure notifications contain pipeline details and logs. Success notifications confirm the pipeline passed.
-Use the watch tool after pushing to CI. Use stop_watch to cancel.
-watch accepts either branch (for push pipelines) or event (e.g. 'tag') \u{2014} not both.";
+const INSTRUCTIONS: &str = "CI pipeline results arrive as <channel source=\"woodpecker-channel\" repo=\"...\" branch=\"...\" event=\"...\" pipeline=\"...\" status=\"...\" commit=\"...\">.
+After pushing, call watch with the repo and the full commit SHA from `git rev-parse HEAD`; this covers push and tag pipelines for that commit. Use branch only to follow every pipeline on a branch.
+The watch response lists current pipelines. Each pipeline that later finishes arrives as one channel message; failures include the failed step's logs.
+Push success is not release success: keep the commit watch until the release pipeline you expect has finished, then call unwatch. Use status to list active watches.";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -34,13 +29,10 @@ pub enum Error {
     Output(#[from] std::io::Error),
 }
 
-struct Context {
-    config: Config,
-    events: event::Sender,
-    http: reqwest::Client,
+enum Step {
+    Continue(Vec<serde_json::Value>),
+    Stop,
 }
-
-type Watchers = hash_map::HashMap<String, tokio::task::JoinHandle<()>>;
 
 fn server_info(version: &str) -> serde_json::Value {
     serde_json::json!({
@@ -68,60 +60,28 @@ fn initialize(id: &serde_json::Value, params: Option<&serde_json::Value>) -> ser
     jsonrpc::result(id, &info)
 }
 
-fn start_watch(context: &Context, watchers: &mut Watchers, watch: poll::Watch) -> String {
-    let key = tools::key(&watch);
-    match watchers.entry(key) {
-        hash_map::Entry::Occupied(entry) => format!("already watching {}", entry.key()),
-        hash_map::Entry::Vacant(entry) => {
-            let message = format!("watching {} \u{2014} polling every 5s", entry.key());
-            tracing::info!(key = %entry.key(), "watch start");
-            let http = context.http.clone();
-            let config = context.config.clone();
-            let events = context.events.clone();
-            let handle = watcher::spawn(http, config, watch, events);
-            entry.insert(handle);
-            message
-        }
-    }
-}
-
-fn stop_watch(watchers: &mut Watchers, watch: &poll::Watch) -> String {
-    let key = tools::key(watch);
-    let Some(handle) = watchers.remove(&key) else {
-        return format!("not watching {key}");
-    };
-    handle.abort();
-    tracing::info!(%key, "watch stop");
-    format!("stopped watching {key}")
-}
-
-fn run_tool(context: &Context, watchers: &mut Watchers, call: tools::Call) -> String {
-    match call.tool {
-        tools::Tool::Watch => start_watch(context, watchers, call.watch),
-        tools::Tool::StopWatch => stop_watch(watchers, &call.watch),
-    }
-}
-
 fn call_tool(
-    context: &Context,
-    watchers: &mut Watchers,
+    context: &watches::Context,
+    active: &mut watches::Watches,
     id: &serde_json::Value,
     params: Option<serde_json::Value>,
-) -> serde_json::Value {
+) -> Option<serde_json::Value> {
     let Some(params) = params else {
-        return jsonrpc::error(id, jsonrpc::INVALID_PARAMS, "missing params");
+        let missing = jsonrpc::error(id, jsonrpc::INVALID_PARAMS, "missing params");
+        return Some(missing);
     };
-    let tool_result = match tools::parse_call(params) {
-        Ok(call) => {
-            let text = run_tool(context, watchers, call);
-            jsonrpc::tool_text(&text, false)
-        }
+    let text = match tools::parse_call(params) {
+        Ok(tools::Call::Watch(watch)) => return watches::start(context, active, id, watch),
+        Ok(tools::Call::Unwatch(watch)) => watches::stop(active, &watch),
+        Ok(tools::Call::Status) => watches::status(active),
         Err(error) => {
-            let text = error.to_string();
-            jsonrpc::tool_text(&text, true)
+            let message = error.to_string();
+            let response = watches::reply(id, &message, true);
+            return Some(response);
         }
     };
-    jsonrpc::result(id, &tool_result)
+    let response = watches::reply(id, &text, false);
+    Some(response)
 }
 
 fn list_tools(id: &serde_json::Value) -> serde_json::Value {
@@ -136,21 +96,22 @@ fn unknown_method(id: &serde_json::Value, method: &str) -> serde_json::Value {
 }
 
 fn handle_request(
-    context: &Context,
-    watchers: &mut Watchers,
+    context: &watches::Context,
+    active: &mut watches::Watches,
     id: &serde_json::Value,
     method: &str,
     params: Option<serde_json::Value>,
-) -> serde_json::Value {
+) -> Option<serde_json::Value> {
     let empty = serde_json::json!({});
     let borrowed = params.as_ref();
-    match method {
+    let response = match method {
         "initialize" => initialize(id, borrowed),
         "ping" => jsonrpc::result(id, &empty),
         "tools/list" => list_tools(id),
-        "tools/call" => call_tool(context, watchers, id, params),
+        "tools/call" => return call_tool(context, active, id, params),
         _ => unknown_method(id, method),
-    }
+    };
+    Some(response)
 }
 
 fn parse_failure(error: &jsonrpc::Error) -> serde_json::Value {
@@ -160,14 +121,13 @@ fn parse_failure(error: &jsonrpc::Error) -> serde_json::Value {
 }
 
 fn handle_line(
-    context: &Context,
-    watchers: &mut Watchers,
+    context: &watches::Context,
+    active: &mut watches::Watches,
     line: &str,
 ) -> Option<serde_json::Value> {
     match jsonrpc::parse(line) {
         Ok(jsonrpc::Incoming::Request { id, method, params }) => {
-            let response = handle_request(context, watchers, &id, &method, params);
-            Some(response)
+            handle_request(context, active, &id, &method, params)
         }
         Ok(jsonrpc::Incoming::Notification { method }) => {
             tracing::debug!(%method, "client notification");
@@ -179,17 +139,6 @@ fn handle_line(
             Some(response)
         }
     }
-}
-
-fn channel_message(notification: Notification) -> serde_json::Value {
-    tracing::info!(meta = ?notification.meta, "notify");
-    let meta: serde_json::Map<String, serde_json::Value> = notification
-        .meta
-        .into_iter()
-        .map(|(key, value)| (key, serde_json::Value::String(value)))
-        .collect();
-    let params = serde_json::json!({"content": notification.content, "meta": meta});
-    jsonrpc::notification(CHANNEL_METHOD, &params)
 }
 
 async fn read_input(events: event::Sender) {
@@ -220,29 +169,46 @@ async fn write(stdout: &mut tokio::io::Stdout, message: &serde_json::Value) -> R
     Ok(())
 }
 
+fn handle_event(
+    context: &watches::Context,
+    active: &mut watches::Watches,
+    next: event::Event,
+) -> Result<Step, Error> {
+    let outgoing = match next {
+        event::Event::Line(line) => {
+            let response = handle_line(context, active, &line);
+            response.into_iter().collect()
+        }
+        event::Event::Notification(finished) => {
+            let message = notification::message(finished);
+            vec![message]
+        }
+        event::Event::Polled { key, result } => watches::polled(context, active, key, result),
+        event::Event::InputFailed(reason) => return Err(Error::Input { reason }),
+        event::Event::InputClosed => return Ok(Step::Stop),
+    };
+    let step = Step::Continue(outgoing);
+    Ok(step)
+}
+
 pub async fn run(server: String, token: String) -> Result<(), Error> {
     let (events, mut incoming) = tokio::sync::mpsc::unbounded_channel();
-    let context = Context {
+    let context = watches::Context {
         config: Config { server, token },
         events: events.clone(),
         http: client::new()?,
     };
     let reading = read_input(events);
     tokio::spawn(reading);
-    let mut watchers = Watchers::new();
+    let mut active = watches::Watches::new();
     let mut stdout = tokio::io::stdout();
     tracing::info!("server connected");
     while let Some(next) = incoming.recv().await {
-        let outgoing = match next {
-            event::Event::Line(line) => handle_line(&context, &mut watchers, &line),
-            event::Event::Notification(notification) => {
-                let message = channel_message(notification);
-                Some(message)
-            }
-            event::Event::InputFailed(reason) => return Err(Error::Input { reason }),
-            event::Event::InputClosed => break,
+        let step = handle_event(&context, &mut active, next)?;
+        let Step::Continue(outgoing) = step else {
+            break;
         };
-        if let Some(message) = outgoing {
+        for message in outgoing {
             write(&mut stdout, &message).await?;
         }
     }

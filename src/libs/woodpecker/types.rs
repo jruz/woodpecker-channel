@@ -7,7 +7,7 @@ pub struct Config {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum WatchTarget {
     Branch(String),
-    Event(String),
+    Commit(String),
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]

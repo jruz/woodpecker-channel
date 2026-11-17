@@ -1,7 +1,8 @@
 use tokio::io::AsyncBufReadExt as _;
 use tokio::io::AsyncWriteExt as _;
 
-const PIPELINES: &str = r#"[{"author": "jruz", "branch": "main", "commit": "abc123", "event": "push", "message": "break things", "number": 3, "status": "failure"}]"#;
+pub const RELEASE_COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+pub const BOT_COMMIT: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 const DETAIL: &str = r#"{"workflows": [{"children": [{"id": 2, "state": "failure"}]}]}"#;
 
@@ -22,19 +23,52 @@ pub fn at<'value>(value: &'value serde_json::Value, pointer: &str) -> &'value se
     value.pointer(pointer).expect(pointer)
 }
 
+pub fn text(response: &serde_json::Value) -> &str {
+    let content = at(response, "/result/content/0/text");
+    content.as_str().expect("text content")
+}
+
+pub fn pipeline(number: u64, status: &str, commit: &str) -> String {
+    format!(
+        r#"{{"author": "jruz", "branch": "main", "commit": "{commit}", "event": "push", "message": "change", "number": {number}, "status": "{status}"}}"#
+    )
+}
+
+pub fn pipelines(entries: &[String]) -> String {
+    let joined = entries.join(", ");
+    format!("[{joined}]")
+}
+
+fn json_response(body: &str) -> wiremock::ResponseTemplate {
+    let template = wiremock::ResponseTemplate::new(200);
+    template.set_body_raw(body, "application/json")
+}
+
 async fn mount_json(server: &wiremock::MockServer, route: &str, body: &str) {
     let get = wiremock::matchers::method("GET");
     let path = wiremock::matchers::path(route);
-    let template = wiremock::ResponseTemplate::new(200);
-    let response = template.set_body_raw(body, "application/json");
+    let response = json_response(body);
     let mock = wiremock::Mock::given(get).and(path).respond_with(response);
     mock.mount(server).await;
 }
 
-pub async fn failing_pipeline_mock() -> wiremock::MockServer {
+async fn mount_first_poll(server: &wiremock::MockServer, body: &str) {
+    let get = wiremock::matchers::method("GET");
+    let path = wiremock::matchers::path("/api/repos/7/pipelines");
+    let response = json_response(body);
+    let mock = wiremock::Mock::given(get)
+        .and(path)
+        .respond_with(response)
+        .up_to_n_times(1)
+        .with_priority(1);
+    mock.mount(server).await;
+}
+
+pub async fn woodpecker_mock(first_poll: &str, later_polls: &str) -> wiremock::MockServer {
     let server = wiremock::MockServer::start().await;
     mount_json(&server, "/api/repos/lookup/jruz/demo", r#"{"id": 7}"#).await;
-    mount_json(&server, "/api/repos/7/pipelines", PIPELINES).await;
+    mount_first_poll(&server, first_poll).await;
+    mount_json(&server, "/api/repos/7/pipelines", later_polls).await;
     mount_json(&server, "/api/repos/7/pipelines/3", DETAIL).await;
     mount_json(&server, "/api/repos/7/logs/3/2", LOGS).await;
     server
@@ -75,7 +109,7 @@ pub async fn send(session: &mut Session, message: &str) {
 }
 
 pub async fn receive(session: &mut Session) -> serde_json::Value {
-    let limit = std::time::Duration::from_secs(10);
+    let limit = std::time::Duration::from_secs(15);
     let next = session.lines.next_line();
     let line = tokio::time::timeout(limit, next)
         .await
@@ -106,4 +140,8 @@ pub async fn call_tool(session: &mut Session, name: &str, arguments: &str) -> se
     );
     send(session, &message).await;
     receive(session).await
+}
+
+pub fn commit_arguments(commit: &str) -> String {
+    format!(r#"{{"repo": "jruz/demo", "commit": "{commit}"}}"#)
 }

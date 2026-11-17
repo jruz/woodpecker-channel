@@ -1,10 +1,17 @@
 use crate::utils::stdio::{
-    at, call_tool, failing_pipeline_mock, initialize, json, receive, send, spawn,
+    BOT_COMMIT, RELEASE_COMMIT, at, call_tool, commit_arguments, initialize, json, pipeline,
+    pipelines, receive, send, spawn, text, woodpecker_mock,
 };
+
+async fn idle_mock() -> wiremock::MockServer {
+    let release = pipeline(3, "success", RELEASE_COMMIT);
+    let body = pipelines(&[release]);
+    woodpecker_mock(&body, &body).await
+}
 
 #[tokio::test]
 async fn declares_channel_capability() {
-    let server = failing_pipeline_mock().await;
+    let server = idle_mock().await;
     let mut session = spawn(&server);
     let response = initialize(&mut session).await;
     assert_eq!(at(&response, "/result/protocolVersion"), "2025-06-18");
@@ -19,8 +26,8 @@ async fn declares_channel_capability() {
 }
 
 #[tokio::test]
-async fn lists_watch_tools() {
-    let server = failing_pipeline_mock().await;
+async fn lists_pi_style_tools() {
+    let server = idle_mock().await;
     let mut session = spawn(&server);
     initialize(&mut session).await;
     send(
@@ -35,40 +42,61 @@ async fn lists_watch_tools() {
         .iter()
         .map(|tool| at(tool, "/name"))
         .collect();
-    assert_eq!(names, vec!["watch", "stop_watch"]);
+    assert_eq!(names, vec!["watch", "unwatch", "status"]);
     session.child.kill().await.expect("kill");
 }
 
 #[tokio::test]
-async fn rejects_branch_and_event_together() {
-    let server = failing_pipeline_mock().await;
+async fn watch_returns_commit_baseline() {
+    let release = pipeline(3, "success", RELEASE_COMMIT);
+    let bot = pipeline(4, "running", BOT_COMMIT);
+    let body = pipelines(&[bot, release]);
+    let server = woodpecker_mock(&body, &body).await;
     let mut session = spawn(&server);
     initialize(&mut session).await;
-    let arguments = r#"{"repo": "jruz/demo", "branch": "main", "event": "tag"}"#;
-    let response = call_tool(&mut session, "watch", arguments).await;
-    assert_eq!(at(&response, "/result/isError"), true);
-    assert_eq!(
-        at(&response, "/result/content/0/text"),
-        "provide either branch or event, not both"
+    let arguments = commit_arguments(RELEASE_COMMIT);
+    let response = call_tool(&mut session, "watch", &arguments).await;
+    let expected = format!(
+        "watching jruz/demo/commit:{RELEASE_COMMIT} \u{2014} polling every 5s\n#3 push main success aaaaaaa"
     );
+    assert_eq!(text(&response), expected);
     session.child.kill().await.expect("kill");
 }
 
 #[tokio::test]
-async fn notifies_failed_pipeline_with_logs() {
-    let server = failing_pipeline_mock().await;
+async fn notifies_pipeline_finished_behind_newer_one() {
+    let running = pipeline(6, "running", RELEASE_COMMIT);
+    let first = pipelines(&[running]);
+    let bot = pipeline(7, "running", BOT_COMMIT);
+    let release = pipeline(6, "success", RELEASE_COMMIT);
+    let later = pipelines(&[bot, release]);
+    let server = woodpecker_mock(&first, &later).await;
     let mut session = spawn(&server);
     initialize(&mut session).await;
     let arguments = r#"{"repo": "jruz/demo", "branch": "main"}"#;
     let response = call_tool(&mut session, "watch", arguments).await;
-    assert_eq!(
-        at(&response, "/result/content/0/text"),
-        "watching jruz/demo/branch:main \u{2014} polling every 5s"
-    );
+    assert!(text(&response).ends_with("#6 push main running aaaaaaa"));
     let notification = receive(&mut session).await;
     assert_eq!(at(&notification, "/method"), "notifications/claude/channel");
+    assert_eq!(at(&notification, "/params/meta/pipeline"), "6");
+    assert_eq!(at(&notification, "/params/meta/status"), "success");
+    assert_eq!(at(&notification, "/params/meta/event"), "push");
+    session.child.kill().await.expect("kill");
+}
+
+#[tokio::test]
+async fn notifies_failure_with_logs() {
+    let running = pipeline(3, "running", RELEASE_COMMIT);
+    let first = pipelines(&[running]);
+    let failed = pipeline(3, "failure", RELEASE_COMMIT);
+    let later = pipelines(&[failed]);
+    let server = woodpecker_mock(&first, &later).await;
+    let mut session = spawn(&server);
+    initialize(&mut session).await;
+    let arguments = commit_arguments(RELEASE_COMMIT);
+    call_tool(&mut session, "watch", &arguments).await;
+    let notification = receive(&mut session).await;
     assert_eq!(at(&notification, "/params/meta/status"), "failure");
-    assert_eq!(at(&notification, "/params/meta/pipeline"), "3");
     let content = at(&notification, "/params/content")
         .as_str()
         .expect("content");
@@ -78,16 +106,57 @@ async fn notifies_failed_pipeline_with_logs() {
 }
 
 #[tokio::test]
-async fn stops_watching() {
-    let server = failing_pipeline_mock().await;
+async fn status_lists_watches() {
+    let server = idle_mock().await;
     let mut session = spawn(&server);
     initialize(&mut session).await;
-    let arguments = r#"{"repo": "jruz/demo", "event": "tag"}"#;
-    let response = call_tool(&mut session, "stop_watch", arguments).await;
+    let arguments = commit_arguments(RELEASE_COMMIT);
+    call_tool(&mut session, "watch", &arguments).await;
+    let response = call_tool(&mut session, "status", "{}").await;
+    let expected = format!("jruz/demo/commit:{RELEASE_COMMIT}\n#3 push main success aaaaaaa");
+    assert_eq!(text(&response), expected);
+    session.child.kill().await.expect("kill");
+}
+
+#[tokio::test]
+async fn unwatch_stops_watch() {
+    let server = idle_mock().await;
+    let mut session = spawn(&server);
+    initialize(&mut session).await;
+    let arguments = commit_arguments(RELEASE_COMMIT);
+    call_tool(&mut session, "watch", &arguments).await;
+    let stopped = call_tool(&mut session, "unwatch", &arguments).await;
+    let expected = format!("stopped watching jruz/demo/commit:{RELEASE_COMMIT}");
+    assert_eq!(text(&stopped), expected);
+    let status = call_tool(&mut session, "status", "{}").await;
+    assert_eq!(text(&status), "no active watches");
+    session.child.kill().await.expect("kill");
+}
+
+#[tokio::test]
+async fn rejects_short_commit() {
+    let server = idle_mock().await;
+    let mut session = spawn(&server);
+    initialize(&mut session).await;
+    let arguments = commit_arguments("abc123");
+    let response = call_tool(&mut session, "watch", &arguments).await;
+    assert_eq!(at(&response, "/result/isError"), true);
     assert_eq!(
-        at(&response, "/result/content/0/text"),
-        "not watching jruz/demo/event:tag"
+        text(&response),
+        "commit must be a full lowercase 40-character SHA, got abc123"
     );
+    session.child.kill().await.expect("kill");
+}
+
+#[tokio::test]
+async fn rejects_branch_and_commit_together() {
+    let server = idle_mock().await;
+    let mut session = spawn(&server);
+    initialize(&mut session).await;
+    let arguments =
+        format!(r#"{{"repo": "jruz/demo", "branch": "main", "commit": "{RELEASE_COMMIT}"}}"#);
+    let response = call_tool(&mut session, "watch", &arguments).await;
+    assert_eq!(text(&response), "provide either branch or commit, not both");
     session.child.kill().await.expect("kill");
 }
 

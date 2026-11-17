@@ -1,27 +1,37 @@
 use crate::core::event;
-use crate::core::poll;
-use crate::libs::woodpecker::types::Config;
+use crate::core::tools::Watch;
+use crate::libs::woodpecker::client;
+use crate::libs::woodpecker::types::{Config, Pipeline};
 
 pub const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
-async fn run(http: reqwest::Client, config: Config, watch: poll::Watch, events: event::Sender) {
+async fn fetch(
+    http: &reqwest::Client,
+    config: &Config,
+    watch: &Watch,
+) -> Result<Vec<Pipeline>, client::Error> {
+    let repo_id = client::repo_id(http, config, &watch.repo).await?;
+    client::recent_pipelines(http, config, repo_id, &watch.target).await
+}
+
+async fn run(
+    http: reqwest::Client,
+    config: Config,
+    watch: Watch,
+    key: String,
+    events: event::Sender,
+) {
     let mut interval = tokio::time::interval(POLL_INTERVAL);
-    let mut last_seen = None;
     loop {
         interval.tick().await;
-        match poll::poll(&http, &config, &watch, last_seen).await {
-            Ok(outcome) => {
-                last_seen = outcome.last_seen;
-                let Some(notification) = outcome.notification else {
-                    continue;
-                };
-                let next = event::Event::Notification(notification);
-                if let Err(closed) = events.send(next) {
-                    tracing::info!(repo = %watch.repo, %closed, "server stopped");
-                    return;
-                }
-            }
-            Err(error) => tracing::error!(repo = %watch.repo, %error, "poll failed"),
+        let result = fetch(&http, &config, &watch).await;
+        let next = event::Event::Polled {
+            key: key.clone(),
+            result,
+        };
+        if let Err(closed) = events.send(next) {
+            tracing::info!(%key, %closed, "server stopped");
+            return;
         }
     }
 }
@@ -30,9 +40,10 @@ async fn run(http: reqwest::Client, config: Config, watch: poll::Watch, events: 
 pub fn spawn(
     http: reqwest::Client,
     config: Config,
-    watch: poll::Watch,
+    watch: Watch,
+    key: String,
     events: event::Sender,
 ) -> tokio::task::JoinHandle<()> {
-    let watching = run(http, config, watch, events);
+    let watching = run(http, config, watch, key, events);
     tokio::spawn(watching)
 }

@@ -18,7 +18,19 @@ Start Claude Code with the channel:
 claude --dangerously-load-development-channels server:woodpecker-channel
 ```
 
-Ask Claude to call `watch` with a `repo` and either a `branch` or an `event`. Pipeline results arrive as `<channel source="woodpecker-channel">` messages. Logs are written to `~/.local/state/woodpecker-channel/server.log`.
+The tools match the Pi Woodpecker extension:
+
+| Tool      | Arguments                              | Purpose                                         |
+| --------- | -------------------------------------- | ----------------------------------------------- |
+| `watch`   | `repo` and one of `commit` or `branch` | Return current pipelines, then report finishes  |
+| `unwatch` | same `repo` and `commit` or `branch`   | Stop a watch                                    |
+| `status`  | none                                   | List active watches with their latest pipelines |
+
+- Watch the full commit SHA after pushing to cover push and tag pipelines for that commit.
+- Each poll checks the latest 20 pipelines every 5 seconds.
+- Every pipeline that finishes arrives as one `<channel source="woodpecker-channel">` message.
+- Failure messages include the last 80 log lines of the failed step.
+- Logs are written to `~/.local/state/woodpecker-channel/server.log`.
 
 ## Development
 

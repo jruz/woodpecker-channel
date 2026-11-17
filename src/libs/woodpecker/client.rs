@@ -4,6 +4,8 @@ use crate::libs::woodpecker::types::{
     Config, LogEntry, Pipeline, PipelineDetail, Repo, Step, WatchTarget,
 };
 
+const RECENT_PIPELINES: &str = "20";
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("failed to build HTTP client: {reason}")]
@@ -55,10 +57,17 @@ pub fn new() -> Result<reqwest::Client, Error> {
     }
 }
 
-fn target_query(target: &WatchTarget) -> [(&'static str, &str); 2] {
+fn target_query(target: &WatchTarget) -> Vec<(&'static str, &str)> {
     match target {
-        WatchTarget::Branch(branch) => [("branch", branch), ("perPage", "1")],
-        WatchTarget::Event(event) => [("event", event), ("perPage", "1")],
+        WatchTarget::Branch(branch) => vec![("branch", branch), ("perPage", RECENT_PIPELINES)],
+        WatchTarget::Commit(_) => vec![("perPage", RECENT_PIPELINES)],
+    }
+}
+
+fn matches_target(target: &WatchTarget, pipeline: &Pipeline) -> bool {
+    match target {
+        WatchTarget::Branch(_) => true,
+        WatchTarget::Commit(commit) => &pipeline.commit == commit,
     }
 }
 
@@ -120,17 +129,20 @@ pub async fn repo_id(http: &reqwest::Client, config: &Config, repo: &str) -> Res
     Ok(found.id)
 }
 
-pub async fn latest_pipeline(
+pub async fn recent_pipelines(
     http: &reqwest::Client,
     config: &Config,
     repo_id: u64,
     target: &WatchTarget,
-) -> Result<Option<Pipeline>, Error> {
+) -> Result<Vec<Pipeline>, Error> {
     let path = format!("/repos/{repo_id}/pipelines");
     let query = target_query(target);
     let pipelines: Vec<Pipeline> = fetch_json(http, config, &path, &query).await?;
-    let latest = pipelines.into_iter().next();
-    Ok(latest)
+    let matching = pipelines
+        .into_iter()
+        .filter(|pipeline| matches_target(target, pipeline))
+        .collect();
+    Ok(matching)
 }
 
 fn is_failed(step: &Step) -> bool {
@@ -188,9 +200,9 @@ pub async fn step_logs(
 #[cfg(test)]
 mod tests {
     use crate::libs::woodpecker::client;
-    use crate::libs::woodpecker::types::{Config, WatchTarget};
+    use crate::libs::woodpecker::types::{Config, Pipeline, WatchTarget};
 
-    const PIPELINES: &str = r#"[{"author": "jruz", "branch": "main", "commit": "abc123", "event": "push", "message": "fix things", "number": 3, "status": "failure"}]"#;
+    const PIPELINES: &str = r#"[{"author": "bot", "branch": "main", "commit": "def456", "event": "push", "message": "update flake", "number": 4, "status": "running"}, {"author": "jruz", "branch": "main", "commit": "abc123", "event": "push", "message": "fix things", "number": 3, "status": "failure"}]"#;
 
     const DETAIL: &str = r#"{"workflows": [{"children": [{"id": 1, "state": "success"}, {"id": 2, "state": "failure"}]}]}"#;
 
@@ -241,34 +253,36 @@ mod tests {
         assert_eq!(id, 7);
     }
 
+    fn numbers(pipelines: &[Pipeline]) -> Vec<u64> {
+        pipelines.iter().map(|pipeline| pipeline.number).collect()
+    }
+
     #[tokio::test]
-    async fn fetches_latest_pipeline_for_branch() {
+    async fn fetches_branch_pipelines() {
         let server = wiremock::MockServer::start().await;
         mount_pipelines(&server, "branch", "main", PIPELINES).await;
         let http = client::new().expect("client");
         let settings = config(&server);
         let branch = "main".to_owned();
         let target = WatchTarget::Branch(branch);
-        let pipeline = client::latest_pipeline(&http, &settings, 7, &target)
+        let pipelines = client::recent_pipelines(&http, &settings, 7, &target)
             .await
-            .expect("pipelines")
-            .expect("one pipeline");
-        assert_eq!(pipeline.number, 3);
-        assert_eq!(pipeline.status, "failure");
+            .expect("pipelines");
+        assert_eq!(numbers(&pipelines), vec![4, 3]);
     }
 
     #[tokio::test]
-    async fn returns_none_without_pipelines() {
+    async fn filters_pipelines_by_commit() {
         let server = wiremock::MockServer::start().await;
-        mount_pipelines(&server, "event", "tag", "[]").await;
+        mount_pipelines(&server, "perPage", "20", PIPELINES).await;
         let http = client::new().expect("client");
         let settings = config(&server);
-        let event = "tag".to_owned();
-        let target = WatchTarget::Event(event);
-        let pipeline = client::latest_pipeline(&http, &settings, 7, &target)
+        let commit = "abc123".to_owned();
+        let target = WatchTarget::Commit(commit);
+        let pipelines = client::recent_pipelines(&http, &settings, 7, &target)
             .await
             .expect("pipelines");
-        assert_eq!(pipeline, None);
+        assert_eq!(numbers(&pipelines), vec![3]);
     }
 
     #[tokio::test]
