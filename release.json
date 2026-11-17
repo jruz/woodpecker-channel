@@ -1,21 +1,21 @@
 {
-  "version": "0.1.0",
+  "version": "0.2.0",
   "platforms": {
     "x86_64-linux": {
       "asset": "woodpecker-channel-unknown-linux-musl-x86_64",
-      "hash": "sha256-fwi6lrMN5ZWLxVv2XoTxdKe0ivmKnckF68930FIqRgY="
+      "hash": "sha256-kIDGmcUjCrU+nyYdA6hhgFaEZAtY2obMNKMdEGmsLv0="
     },
     "aarch64-linux": {
       "asset": "woodpecker-channel-unknown-linux-musl-aarch64",
-      "hash": "sha256-9fw5LNdR+wDxOwNL5BbqojEZ3yrFHmfcTH64IRhAuy8="
+      "hash": "sha256-m1R4ie4TE9O+Eot4Py6hkSKtii+w7Gejl0BThMRPcDE="
     },
     "x86_64-darwin": {
       "asset": "woodpecker-channel-apple-darwin-x86_64",
-      "hash": "sha256-ekxYaSiPTsfV5ak5RzsmLGbazjx/oukmQUxyqt56wQY="
+      "hash": "sha256-MUFEa93VswbMVak7Irz7fWnqpDf6iOoYuUi70GTZgKo="
     },
     "aarch64-darwin": {
       "asset": "woodpecker-channel-apple-darwin-aarch64",
-      "hash": "sha256-Yih+BMBnMKnB4woE7aj/Ml0lA8h6BbI/pAC+FbGHoK4="
+      "hash": "sha256-DmCdycVUjA/zHkHOovA3VQAl//IMGEsr7mWkB0wy6lg="
     }
   }
 }
