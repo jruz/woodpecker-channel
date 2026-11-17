@@ -1,10 +1,12 @@
 mod commands;
+mod core;
+mod libs;
 mod utils;
 
 use std::process::ExitCode;
 
 use clap::Parser as _;
-use commands::version;
+use commands::{serve, version};
 use utils::output::Output;
 
 #[derive(Debug, clap::Parser)]
@@ -16,12 +18,15 @@ struct Arguments {
 
 #[derive(Clone, Copy, Debug, clap::Subcommand)]
 enum Command {
+    #[command(about = "Run the MCP channel server over stdio")]
+    Serve,
     #[command(about = "Show version and build metadata")]
     Version,
 }
 
 fn run(command: Command) -> Output {
     match command {
+        Command::Serve => serve::run(),
         Command::Version => version::run(),
     }
 }
@@ -32,9 +37,10 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     };
     let output = run(command);
-    print!("{}", output.text);
     if output.success {
+        print!("{}", output.text);
         return ExitCode::SUCCESS;
     }
+    eprint!("{}", output.text);
     ExitCode::FAILURE
 }

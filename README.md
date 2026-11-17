@@ -2,6 +2,24 @@
 
 MCP channel server that monitors Woodpecker CI pipelines and pushes failure notifications into the active session.
 
+## Use with Claude Code
+
+Set `WOODPECKER_SERVER` and `WOODPECKER_TOKEN` in the environment Claude Code runs in.
+
+Register the server:
+
+```sh
+claude mcp add --scope user woodpecker-channel "$(which woodpecker-channel)" serve
+```
+
+Start Claude Code with the channel:
+
+```sh
+claude --dangerously-load-development-channels server:woodpecker-channel
+```
+
+Ask Claude to call `watch` with a `repo` and either a `branch` or an `event`. Pipeline results arrive as `<channel source="woodpecker-channel">` messages. Logs are written to `~/.local/state/woodpecker-channel/server.log`.
+
 ## Development
 
 - `just run`

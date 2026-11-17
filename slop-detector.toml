@@ -1,0 +1,2 @@
+[ignore.by-rule]
+no-spawn = ["tests/utils/stdio.rs"]
