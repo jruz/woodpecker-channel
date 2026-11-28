@@ -16,12 +16,21 @@
     "is_template": false
   },
   "topics": {
-    "names": ["claude-code", "cli", "mcp", "nix", "rust", "woodpecker"]
+    "names": [
+      "claude-code",
+      "cli",
+      "mcp",
+      "nix",
+      "rust",
+      "woodpecker"
+    ]
   },
   "branch_protection": {
     "required_status_checks": {
       "strict": true,
-      "contexts": ["ci/woodpecker/pr/check"]
+      "contexts": [
+        "ci/woodpecker/pr/check"
+      ]
     },
     "enforce_admins": false,
     "required_pull_request_reviews": null,
@@ -34,8 +43,8 @@
     "enabled": false
   },
   "security": {
-    "vulnerability-alerts": true,
-    "automated-security-fixes": false
+    "vulnerability_alerts": true,
+    "automated_security_fixes": false
   },
   "labels": [
     {
